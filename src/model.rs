@@ -1,7 +1,11 @@
+use std::collections::VecDeque;
+
 use crate::{
     playlist::{Playlist, RepeatMode, Track},
     youtube::SearchState,
 };
+
+const MAX_LOG_MESSAGES: usize = 1000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum ActivePanel {
@@ -33,14 +37,18 @@ pub struct UiState {
     pub show_help: bool,
     pub show_logs: bool,
     pub show_youtube: bool,
-    pub is_loading: bool,
-    pub log_messages: Vec<String>,
+    pub log_messages: VecDeque<String>,
     pub log_scroll: usize,
     pub log_selected: usize,
     pub playback_error: Option<String>,
     pub active_panel: ActivePanel,
     pub search_scroll: usize,
     pub search_selected: usize,
+    // Visible row counts of each scrollable panel, updated every frame from the
+    // real layout so scrolling stays correct at any terminal size.
+    pub playlist_viewport: usize,
+    pub search_viewport: usize,
+    pub log_viewport: usize,
 }
 
 #[derive(Debug)]
@@ -48,7 +56,7 @@ pub struct Model {
     pub playlist: Playlist,
     pub current_index: Option<usize>,
     pub playback: PlaybackState,
-    pub volume: i8,
+    pub volume: u8,
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub ui: UiState,
@@ -85,10 +93,10 @@ impl Model {
 
     pub fn add_log(&mut self, msg: &str) {
         for m in msg.split('\n') {
-            self.ui.log_messages.push(m.to_string());
+            self.ui.log_messages.push_back(m.to_string());
         }
-        if self.ui.log_messages.len() > 1000 {
-            self.ui.log_messages.remove(0);
+        while self.ui.log_messages.len() > MAX_LOG_MESSAGES {
+            self.ui.log_messages.pop_front();
         }
     }
 }

@@ -1,14 +1,13 @@
-use crate::audio::decoder::get_audio_info;
 use crate::audio::AudioBackend;
 use anyhow::Result;
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::path::Path;
 
 pub struct RodioBackend {
     sink: MixerDeviceSink,
     player: Option<Player>,
-    volume: i8,
+    volume: u8,
     position_ms: u64,
     duration_ms: u64,
 }
@@ -19,7 +18,7 @@ impl RodioBackend {
         sink.log_on_drop(false);
 
         Ok(Self {
-            sink: sink,
+            sink,
             player: None,
             volume: 100,
             position_ms: 0,
@@ -32,9 +31,6 @@ impl AudioBackend for RodioBackend {
     fn load_track(&mut self, path: &Path) -> anyhow::Result<()> {
         self.stop();
 
-        let audio_info = get_audio_info(path)?;
-
-        self.duration_ms = audio_info.duration_ms;
         self.position_ms = 0;
 
         let file = File::open(path)?;
@@ -45,6 +41,13 @@ impl AudioBackend for RodioBackend {
             .with_byte_len(len)
             .with_data(file)
             .build()?;
+
+        // Read the duration from the same decoder we play, avoiding a second
+        // decode pass. 0 means "unknown" (some formats can't report it).
+        self.duration_ms = decoder
+            .total_duration()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         let player = Player::connect_new(self.sink.mixer());
 
@@ -104,8 +107,8 @@ impl AudioBackend for RodioBackend {
         self.duration_ms
     }
 
-    fn set_volume(&mut self, volume: i8) {
-        self.volume = volume.clamp(0, 100);
+    fn set_volume(&mut self, volume: u8) {
+        self.volume = volume.min(100);
 
         let float_volume: f32 = self.volume as f32 / 100.0;
 

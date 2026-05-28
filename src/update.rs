@@ -12,18 +12,24 @@ use souvlaki::{MediaControls, MediaMetadata};
 
 pub fn update_media_controls(
     track: Option<&Track>,
-    media_controls: &mut MediaControls,
+    media_controls: &mut Option<MediaControls>,
 ) -> Result<()> {
+    // Media controls are optional: if the platform/session didn't provide them
+    // we simply skip updating metadata.
+    let Some(controls) = media_controls.as_mut() else {
+        return Ok(());
+    };
+
     // Update current playing song:
     match track {
-        Some(t) => media_controls.set_metadata(MediaMetadata {
+        Some(t) => controls.set_metadata(MediaMetadata {
             title: Some(&t.title),
             album: Some(&t.album),
             artist: Some(&t.artist),
             cover_url: None,
             duration: Some(Duration::from_millis(t.duration_ms)),
         })?,
-        None => media_controls.set_metadata(MediaMetadata::default())?,
+        None => controls.set_metadata(MediaMetadata::default())?,
     };
 
     Ok(())
@@ -35,19 +41,32 @@ pub fn update<T: AudioBackend>(
     player: &mut T,
     yt_service: &YoutubeService,
     task: &Task<Message>,
-    media_controls: &mut MediaControls,
+    media_controls: &mut Option<MediaControls>,
 ) -> Result<Message> {
-    // Logger
-
+    // Logger: skip high-frequency / no-op messages to keep the log useful.
     match msg {
-        Message::None | Message::Quit | Message::Tick => {}
+        Message::None
+        | Message::Quit
+        | Message::Tick
+        | Message::ScrollUp
+        | Message::ScrollDown
+        | Message::ScrollUpHalf
+        | Message::ScrollDownHalf
+        | Message::ScrollTop
+        | Message::ScrollBottom
+        | Message::LogScrollUp
+        | Message::LogScrollDown
+        | Message::LogScrollTop
+        | Message::LogScrollBottom => {}
         _ => model.add_log(&format!("{msg:?}")),
     }
 
     match msg {
         Message::Play => {
+            // duration_ms == 0 means the duration is unknown; still allow playback.
             if model.playback.status != PlaybackStatus::Playing
-                && model.playback.position_ms < model.playback.duration_ms
+                && (model.playback.duration_ms == 0
+                    || model.playback.position_ms < model.playback.duration_ms)
             {
                 player.play()?;
                 model.playback.status = PlaybackStatus::Playing;
@@ -58,7 +77,7 @@ pub fn update<T: AudioBackend>(
         Message::Pause => {
             if model.playback.status == PlaybackStatus::Playing {
                 player.pause();
-                model.playback.position_ms = player.get_position() - 100;
+                model.playback.position_ms = player.get_position().saturating_sub(100);
                 model.playback.status = PlaybackStatus::Paused;
                 update_media_controls(model.current_track(), media_controls)?;
             }
@@ -126,12 +145,12 @@ pub fn update<T: AudioBackend>(
         }
 
         Message::IncreaseVolume => {
-            let vol = (model.volume + 5).clamp(0, 100);
+            let vol = model.volume.saturating_add(5).min(100);
             player.set_volume(vol);
             model.volume = vol;
         }
         Message::DecreaseVolume => {
-            let vol = (model.volume - 5).clamp(0, 100);
+            let vol = model.volume.saturating_sub(5);
             player.set_volume(vol);
             model.volume = vol;
         }
@@ -187,16 +206,16 @@ pub fn update<T: AudioBackend>(
         Message::ScrollUpHalf => {
             match model.ui.active_panel {
                 ActivePanel::Playlist => {
-                    let new_selected = model.ui.selected.saturating_sub(10);
-                    model.ui.selected = new_selected;
+                    let half = (model.ui.playlist_viewport / 2).max(1);
+                    model.ui.selected = model.ui.selected.saturating_sub(half);
                     adjust_scroll(model);
                 }
                 ActivePanel::SearchInput => {
                     // Do nothing
                 }
                 ActivePanel::SearchResults => {
-                    let new_selected = model.ui.search_selected.saturating_sub(10);
-                    model.ui.search_selected = new_selected;
+                    let half = (model.ui.search_viewport / 2).max(1);
+                    model.ui.search_selected = model.ui.search_selected.saturating_sub(half);
                     adjust_search_scroll(model);
                 }
             }
@@ -205,18 +224,18 @@ pub fn update<T: AudioBackend>(
         Message::ScrollDownHalf => {
             match model.ui.active_panel {
                 ActivePanel::Playlist => {
-                    let new_selected =
-                        (model.ui.selected + 10).min(model.playlist.len().saturating_sub(1));
-                    model.ui.selected = new_selected;
+                    let half = (model.ui.playlist_viewport / 2).max(1);
+                    model.ui.selected =
+                        (model.ui.selected + half).min(model.playlist.len().saturating_sub(1));
                     adjust_scroll(model);
                 }
                 ActivePanel::SearchInput => {
                     // Do nothing
                 }
                 ActivePanel::SearchResults => {
-                    let new_selected = (model.ui.search_selected + 10)
+                    let half = (model.ui.search_viewport / 2).max(1);
+                    model.ui.search_selected = (model.ui.search_selected + half)
                         .min(model.search.results.len().saturating_sub(1));
-                    model.ui.search_selected = new_selected;
                     adjust_search_scroll(model);
                 }
             }
@@ -243,7 +262,10 @@ pub fn update<T: AudioBackend>(
                 ActivePanel::Playlist => {
                     let list_len = model.playlist.len();
                     model.ui.selected = list_len.saturating_sub(1);
-                    model.ui.scroll = model.ui.selected.saturating_sub(19);
+                    model.ui.scroll = model
+                        .ui
+                        .selected
+                        .saturating_sub(model.ui.playlist_viewport.saturating_sub(1));
                 }
                 ActivePanel::SearchInput => {
                     // Do nothing
@@ -251,7 +273,10 @@ pub fn update<T: AudioBackend>(
                 ActivePanel::SearchResults => {
                     let results_len = model.search.results.len();
                     model.ui.search_selected = results_len.saturating_sub(1);
-                    model.ui.search_scroll = model.ui.search_selected.saturating_sub(19);
+                    model.ui.search_scroll = model
+                        .ui
+                        .search_selected
+                        .saturating_sub(model.ui.search_viewport.saturating_sub(1));
                 }
             }
         }
@@ -261,18 +286,8 @@ pub fn update<T: AudioBackend>(
                 if !model.search.query.is_empty() {
                     model.search.is_loading = true;
                 }
-            } else {
-                match model.ui.active_panel {
-                    ActivePanel::Playlist => {
-                        play_track(model.ui.selected, model, player);
-                    }
-                    ActivePanel::SearchInput => {}
-                    ActivePanel::SearchResults => {
-                        if model.ui.search_selected < model.search.results.len() {
-                            return Ok(Message::None);
-                        }
-                    }
-                }
+            } else if matches!(model.ui.active_panel, ActivePanel::Playlist) {
+                play_track(model.ui.selected, model, player);
             }
         }
 
@@ -345,7 +360,6 @@ pub fn update<T: AudioBackend>(
                     model.search.results = tracks;
                     model.ui.active_panel = ActivePanel::SearchResults;
 
-                    model.add_log(&format!("{:?}", model.search.results));
                     model.add_log(&format!("Found {} tracks", model.search.results.len()));
                 }
                 Err(e) => model.add_log(&format!("Search error: {e:?}")),
@@ -510,28 +524,29 @@ fn play_track<T: AudioBackend>(idx: usize, model: &mut Model, player: &mut T) {
     }
 }
 
-fn adjust_scroll(model: &mut Model) {
-    if model.ui.selected >= model.ui.scroll + 20 {
-        model.ui.scroll = model.ui.selected.saturating_sub(19);
-    } else if model.ui.selected < model.ui.scroll {
-        model.ui.scroll = model.ui.selected;
+/// Keep `scroll` such that `selected` stays within a window of `viewport` rows.
+fn keep_in_view(selected: usize, scroll: &mut usize, viewport: usize) {
+    let v = viewport.max(1);
+    if selected >= *scroll + v {
+        *scroll = selected + 1 - v;
+    } else if selected < *scroll {
+        *scroll = selected;
     }
+}
+
+fn adjust_scroll(model: &mut Model) {
+    let v = model.ui.playlist_viewport;
+    keep_in_view(model.ui.selected, &mut model.ui.scroll, v);
 }
 
 fn adjust_search_scroll(model: &mut Model) {
-    if model.ui.search_selected >= model.ui.search_scroll + 20 {
-        model.ui.search_scroll = model.ui.search_selected.saturating_sub(19);
-    } else if model.ui.search_selected < model.ui.search_scroll {
-        model.ui.search_scroll = model.ui.search_selected;
-    }
+    let v = model.ui.search_viewport;
+    keep_in_view(model.ui.search_selected, &mut model.ui.search_scroll, v);
 }
 
 fn adjust_log_scroll(model: &mut Model) {
-    if model.ui.log_selected >= model.ui.log_scroll + 20 {
-        model.ui.log_scroll = model.ui.log_selected.saturating_sub(19);
-    } else if model.ui.log_selected < model.ui.log_scroll {
-        model.ui.log_scroll = model.ui.log_selected;
-    }
+    let v = model.ui.log_viewport;
+    keep_in_view(model.ui.log_selected, &mut model.ui.log_scroll, v);
 }
 
 pub fn read_tracks() -> Vec<Track> {
@@ -542,7 +557,10 @@ pub fn read_tracks() -> Vec<Track> {
     let paths = get_scan_paths();
 
     for p in paths {
-        for entry in fs::read_dir(p).unwrap().filter_map(|e| e.ok()) {
+        let Ok(read_dir) = fs::read_dir(&p) else {
+            continue;
+        };
+        for entry in read_dir.filter_map(|e| e.ok()) {
             let path = entry.path();
             if is_audio_file(&path) && !tracks.iter().any(|t: &Track| t.path == path) {
                 tracks.push(crate::playlist::Track::new(path));

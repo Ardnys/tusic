@@ -68,37 +68,20 @@ impl Track {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Playlist {
     tracks: Vec<Track>,
-    original_indices: Vec<usize>,
 }
 
 impl Playlist {
     pub fn new() -> Self {
-        Self {
-            tracks: Vec::new(),
-            original_indices: Vec::new(),
-        }
+        Self { tracks: Vec::new() }
     }
 
     pub fn from_tracks(tracks: Vec<Track>) -> Self {
-        let original_indices: Vec<usize> = (0..tracks.len()).collect();
-        Self {
-            tracks,
-            original_indices,
-        }
+        Self { tracks }
     }
 
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
-
-    /*
-    pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty()
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut Track> {
-        self.tracks.get_mut(index)
-    }*/
 
     pub fn get(&self, index: usize) -> Option<&Track> {
         self.tracks.get(index)
@@ -108,18 +91,6 @@ impl Playlist {
         &self.tracks
     }
 
-    /*
-    pub fn tracks_mut(&mut self) -> &mut Vec<Track> {
-        &mut self.tracks
-    }
-
-    pub fn clear(&mut self) {
-        self.tracks.clear();
-        self.original_indices.clear();
-    }
-
-    */
-
     pub fn push(&mut self, track: Track) -> usize {
         if let Some(idx) = self.tracks.iter().position(|t| t.path == track.path) {
             // Already exists, don't add
@@ -127,7 +98,6 @@ impl Playlist {
         }
 
         self.tracks.push(track);
-        self.original_indices.push(self.tracks.len() - 1);
 
         self.tracks.len() - 1
     }
@@ -143,12 +113,21 @@ impl Playlist {
             return None;
         }
 
-        let random_idx: usize = rand::random_range(0..len);
-
         match current {
             None => Some(0),
             Some(i) if repeat == RepeatMode::One => Some(i),
-            Some(_) if shuffle => Some(random_idx),
+            Some(cur) if shuffle => {
+                // Pick uniformly among the *other* tracks so the same song
+                // doesn't repeat back-to-back.
+                if len == 1 {
+                    return Some(0);
+                }
+                let mut r = rand::random_range(0..len - 1);
+                if r >= cur {
+                    r += 1;
+                }
+                Some(r)
+            }
             Some(i) if i + 1 < len => Some(i + 1),
             Some(_) if repeat == RepeatMode::All => Some(0),
             Some(_) => Some(0),
@@ -175,4 +154,83 @@ pub fn is_audio_file(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playlist_of(n: usize) -> Playlist {
+        Playlist::from_tracks((0..n).map(|i| Track::new(format!("/tmp/{i}.mp3").into())).collect())
+    }
+
+    #[test]
+    fn repeat_mode_cycles() {
+        assert_eq!(RepeatMode::None.next(), RepeatMode::All);
+        assert_eq!(RepeatMode::All.next(), RepeatMode::One);
+        assert_eq!(RepeatMode::One.next(), RepeatMode::None);
+    }
+
+    #[test]
+    fn is_audio_file_checks_extension_case_insensitively() {
+        assert!(is_audio_file(Path::new("song.mp3")));
+        assert!(is_audio_file(Path::new("song.MP3")));
+        assert!(is_audio_file(Path::new("song.M4a")));
+        assert!(!is_audio_file(Path::new("song.txt")));
+        assert!(!is_audio_file(Path::new("noext")));
+    }
+
+    #[test]
+    fn next_index_empty_is_none() {
+        let pl = playlist_of(0);
+        assert_eq!(pl.next_index(None, RepeatMode::None, false), None);
+        assert_eq!(pl.next_index(Some(0), RepeatMode::All, true), None);
+    }
+
+    #[test]
+    fn next_index_advances_and_wraps() {
+        let pl = playlist_of(3);
+        assert_eq!(pl.next_index(None, RepeatMode::None, false), Some(0));
+        assert_eq!(pl.next_index(Some(0), RepeatMode::None, false), Some(1));
+        assert_eq!(pl.next_index(Some(2), RepeatMode::None, false), Some(0));
+        assert_eq!(pl.next_index(Some(2), RepeatMode::All, false), Some(0));
+    }
+
+    #[test]
+    fn next_index_repeat_one_stays() {
+        let pl = playlist_of(3);
+        assert_eq!(pl.next_index(Some(1), RepeatMode::One, false), Some(1));
+    }
+
+    #[test]
+    fn next_index_shuffle_never_repeats_current() {
+        let pl = playlist_of(5);
+        for _ in 0..1000 {
+            let n = pl.next_index(Some(2), RepeatMode::None, true).unwrap();
+            assert!(n < 5 && n != 2, "shuffle returned {n}");
+        }
+        // Single-track playlist must still yield the only index.
+        assert_eq!(playlist_of(1).next_index(Some(0), RepeatMode::None, true), Some(0));
+    }
+
+    #[test]
+    fn prev_index_behaviour() {
+        let pl = playlist_of(3);
+        assert_eq!(pl.prev_index(Some(2), RepeatMode::None), Some(1));
+        assert_eq!(pl.prev_index(Some(0), RepeatMode::None), Some(0));
+        assert_eq!(pl.prev_index(Some(0), RepeatMode::All), Some(2));
+        assert_eq!(playlist_of(0).prev_index(Some(0), RepeatMode::None), None);
+    }
+
+    #[test]
+    fn push_dedups_by_path() {
+        let mut pl = playlist_of(0);
+        let a = pl.push(Track::new("/tmp/a.mp3".into()));
+        let b = pl.push(Track::new("/tmp/b.mp3".into()));
+        let a_again = pl.push(Track::new("/tmp/a.mp3".into()));
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert_eq!(a_again, 0);
+        assert_eq!(pl.len(), 2);
+    }
 }

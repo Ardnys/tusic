@@ -12,7 +12,7 @@ use crate::ui::search::SearchResultsState;
 use crate::ui::search::{render_search_input, render_search_results};
 use crate::update::{read_tracks, update};
 use crate::watcher;
-use crate::youtube::{get_download_dir, get_scan_paths, YoutubeService};
+use crate::youtube::{get_scan_paths, YoutubeService};
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -25,7 +25,7 @@ use ratatui::{
 };
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata};
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::task::Task;
 
@@ -38,52 +38,19 @@ pub struct App<T: AudioBackend> {
     logs_state: LogsState,
     task: Task<Message>,
     task_rx: Receiver<Message>,
-    media_controls: MediaControls,
+    media_controls: Option<MediaControls>,
 }
 
 impl<T: AudioBackend> App<T> {
-    pub fn new(backend: T) -> Result<Self> {
-        // YouTube service
-        let download_dir = get_download_dir();
-
-        let yt_service = YoutubeService::new(download_dir.clone());
-        let yt_service = smol::block_on(async_compat::Compat::new(yt_service))?;
-
+    pub fn new(backend: T, yt_service: YoutubeService) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::channel::<Message>();
 
         // File change watcher
         watcher::watch(get_scan_paths(), task_tx.clone())?;
 
-        // Media controls
-        let mut media_controls = MediaControls::new(souvlaki::PlatformConfig {
-            dbus_name: "tusic",
-            display_name: "Tusic",
-            hwnd: None,
-        })
-        .unwrap();
-
-        // The closure must be Send and have a static lifetime
-        let media_tx = task_tx.clone();
-        media_controls
-            .attach(move |event: MediaControlEvent| {
-                let msg = match event {
-                    MediaControlEvent::Next => Message::Next,
-                    MediaControlEvent::Previous => Message::Prev,
-                    MediaControlEvent::Toggle => Message::PlayPause,
-                    MediaControlEvent::Play => Message::Play,
-                    MediaControlEvent::Stop => Message::Pause,
-
-                    _ => Message::None,
-                };
-
-                let _ = media_tx.send(msg);
-            })
-            .unwrap();
-
-        // Update the media metadata.
-        media_controls
-            .set_metadata(MediaMetadata::default())
-            .unwrap();
+        // Media controls are best-effort: on platforms without a session/D-Bus
+        // they fail to initialize and we simply run without them.
+        let media_controls = Self::init_media_controls(task_tx.clone());
 
         // Create
         Ok(Self {
@@ -99,6 +66,36 @@ impl<T: AudioBackend> App<T> {
         })
     }
 
+    fn init_media_controls(task_tx: Sender<Message>) -> Option<MediaControls> {
+        let mut media_controls = MediaControls::new(souvlaki::PlatformConfig {
+            dbus_name: "tusic",
+            display_name: "Tusic",
+            hwnd: None,
+        })
+        .ok()?;
+
+        // The closure must be Send and have a static lifetime
+        media_controls
+            .attach(move |event: MediaControlEvent| {
+                let msg = match event {
+                    MediaControlEvent::Next => Message::Next,
+                    MediaControlEvent::Previous => Message::Prev,
+                    MediaControlEvent::Toggle => Message::PlayPause,
+                    MediaControlEvent::Play => Message::Play,
+                    MediaControlEvent::Stop => Message::Pause,
+
+                    _ => Message::None,
+                };
+
+                let _ = task_tx.send(msg);
+            })
+            .ok()?;
+
+        media_controls.set_metadata(MediaMetadata::default()).ok()?;
+
+        Some(media_controls)
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.running = true;
 
@@ -108,6 +105,18 @@ impl<T: AudioBackend> App<T> {
         model.set_tracks(playlist);
 
         while self.running {
+            // Keep scroll viewports in sync with the real rendered layout so
+            // paging/scrolling is correct at any terminal size.
+            let size = terminal.size()?;
+            let regions = calculate_layout(Rect::new(0, 0, size.width, size.height), &model);
+            // Each scrollable panel is wrapped in a bordered Block (inner = height - 2).
+            model.ui.playlist_viewport = regions.playlist.height.saturating_sub(2) as usize;
+            model.ui.search_viewport = regions.search_results.height.saturating_sub(2) as usize;
+            model.ui.log_viewport = regions
+                .logs
+                .map(|r| r.height.saturating_sub(2) as usize)
+                .unwrap_or(0);
+
             // Draw
             terminal.draw(|f| self.render_frame(f, &model))?;
 
@@ -197,6 +206,7 @@ impl<T: AudioBackend> App<T> {
                 KeyCode::Home => Message::LogScrollTop,
                 KeyCode::End => Message::LogScrollBottom,
                 KeyCode::Char('l') => Message::ToggleLogs,
+                KeyCode::Char('q') => Message::Quit,
                 _ => Message::None,
             };
         }

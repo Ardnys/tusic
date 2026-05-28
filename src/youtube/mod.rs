@@ -135,7 +135,9 @@ impl YoutubeService {
 
     pub async fn download_track(&self, track: &YoutubeTrack) -> anyhow::Result<Track> {
         let safe_title = sanitize_filename(&track.title);
-        let mut filename = format!("{}.m4a", safe_title);
+        // Append the video id so two videos with the same title don't overwrite
+        // each other's file.
+        let mut filename = format!("{}-{}.m4a", safe_title, track.video_id);
 
         let video = self
             .downloader
@@ -155,7 +157,7 @@ impl YoutubeService {
                 yt_dlp::model::AudioQuality::High,
                 yt_dlp::model::AudioCodecPreference::MP3,
             );
-            filename = format!("{}.mp3", safe_title);
+            filename = format!("{}-{}.mp3", safe_title, track.video_id);
         }
 
         match format {

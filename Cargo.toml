@@ -28,21 +28,21 @@ rodio = { version = "0.22", features = [
 ] }
 # symphonia = { version = "*", features = ["all"] }
 cpal = "0.17"
-souvlaki = "*"
+souvlaki = "0.8"
 
 # utils
 dirs = "6.0"
-anyhow = "*"
+anyhow = "1.0"
 thiserror = "2"
 inotify = "0.11"
-rand = "*"
+rand = "0.10"
 
 # Async
 smol = "2"
 async-compat = "0.2"
 
 # Youtube
-yt-dlp = { version = "*", features = ["rustls"] } #only for download
+yt-dlp = { version = "2.1", features = ["rustls"] } #only for download
 rusty_ytdl = { version = "0.7", default-features = false, features = [
     "search",
     "rustls-tls",
