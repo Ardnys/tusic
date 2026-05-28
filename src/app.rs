@@ -23,6 +23,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     DefaultTerminal, Frame,
 };
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata};
 
 use std::sync::mpsc::{self, Receiver};
 
@@ -37,6 +38,7 @@ pub struct App<T: AudioBackend> {
     logs_state: LogsState,
     task: Task<Message>,
     task_rx: Receiver<Message>,
+    media_controls: MediaControls,
 }
 
 impl<T: AudioBackend> App<T> {
@@ -52,6 +54,37 @@ impl<T: AudioBackend> App<T> {
         // File change watcher
         watcher::watch(get_scan_paths(), task_tx.clone())?;
 
+        // Media controls
+        let mut media_controls = MediaControls::new(souvlaki::PlatformConfig {
+            dbus_name: "tusic",
+            display_name: "Tusic",
+            hwnd: None,
+        })
+        .unwrap();
+
+        // The closure must be Send and have a static lifetime
+        let media_tx = task_tx.clone();
+        media_controls
+            .attach(move |event: MediaControlEvent| {
+                let msg = match event {
+                    MediaControlEvent::Next => Message::Next,
+                    MediaControlEvent::Previous => Message::Prev,
+                    MediaControlEvent::Toggle => Message::PlayPause,
+                    MediaControlEvent::Play => Message::Play,
+                    MediaControlEvent::Stop => Message::Pause,
+
+                    _ => Message::None,
+                };
+
+                let _ = media_tx.send(msg);
+            })
+            .unwrap();
+
+        // Update the media metadata.
+        media_controls
+            .set_metadata(MediaMetadata::default())
+            .unwrap();
+
         // Create
         Ok(Self {
             player: backend,
@@ -62,6 +95,7 @@ impl<T: AudioBackend> App<T> {
             logs_state: LogsState::default(),
             task: Task::new(task_tx),
             task_rx,
+            media_controls,
         })
     }
 
@@ -78,29 +112,48 @@ impl<T: AudioBackend> App<T> {
             terminal.draw(|f| self.render_frame(f, &model))?;
 
             // Input Events
-            let msg = self.handle_events(&mut model)?;
+            let mut msg = self.handle_events(&mut model)?;
             if matches!(msg, Message::Quit) {
                 break;
             }
 
             // Update from Input Events
-            update(
+            msg = update(
                 &mut model,
                 msg,
                 &mut self.player,
                 &self.yt_service,
                 &self.task,
+                &mut self.media_controls,
             )?;
 
-            // Handle results from async Tasks
-            while let Ok(m) = self.task_rx.try_recv() {
-                update(
+            while !matches!(msg, Message::None | Message::Tick) {
+                // Handle other messages come from previous messages
+                msg = update(
                     &mut model,
-                    m,
+                    msg,
                     &mut self.player,
                     &self.yt_service,
                     &self.task,
+                    &mut self.media_controls,
                 )?;
+            }
+
+            // Handle results from async Tasks
+            while let Ok(m) = self.task_rx.try_recv() {
+                let mut msg2 = m;
+
+                while !matches!(msg2, Message::None | Message::Tick) {
+                    // Handle other messages come from previous messages
+                    msg2 = update(
+                        &mut model,
+                        msg2,
+                        &mut self.player,
+                        &self.yt_service,
+                        &self.task,
+                        &mut self.media_controls,
+                    )?;
+                }
             }
         }
 
@@ -175,13 +228,7 @@ impl<T: AudioBackend> App<T> {
 
             (KeyCode::Char('q'), _) => Message::Quit,
 
-            (KeyCode::Char(' '), _) if active_playlist => {
-                if self.player.is_playing() {
-                    Message::Pause
-                } else {
-                    Message::Play
-                }
-            }
+            (KeyCode::Char(' '), _) if active_playlist => Message::PlayPause,
 
             (KeyCode::Char('l'), _) => Message::ToggleLogs,
             (KeyCode::Char('r'), _) if active_playlist => Message::CycleRepeat,

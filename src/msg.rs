@@ -11,6 +11,7 @@ pub enum Message {
     Pause,
     Next,
     Prev,
+    PlayPause,
 
     SeekForward,
     SeekBackward,

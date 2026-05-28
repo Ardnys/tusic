@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use rand::Rng;
-
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     // Waiting for rodio support of: "ogg", "webm", "wma", "opus", "flac"
     "mp3", "wav", "m4a", "aac",
@@ -145,7 +143,7 @@ impl Playlist {
             return None;
         }
 
-        let random_idx: usize = rand::thread_rng().gen_range(0..len);
+        let random_idx: usize = rand::random_range(0..len);
 
         match current {
             None => Some(0),

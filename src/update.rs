@@ -1,4 +1,5 @@
 use std::fs;
+use std::time::Duration;
 
 use crate::audio::AudioBackend;
 use crate::model::{ActivePanel, Model, PlaybackStatus};
@@ -7,6 +8,26 @@ use crate::playlist::{RepeatMode, Track};
 use crate::task::Task;
 use crate::youtube::{get_scan_paths, YoutubeService};
 use anyhow::Result;
+use souvlaki::{MediaControls, MediaMetadata};
+
+pub fn update_media_controls(
+    track: Option<&Track>,
+    media_controls: &mut MediaControls,
+) -> Result<()> {
+    // Update current playing song:
+    match track {
+        Some(t) => media_controls.set_metadata(MediaMetadata {
+            title: Some(&t.title),
+            album: Some(&t.album),
+            artist: Some(&t.artist),
+            cover_url: None,
+            duration: Some(Duration::from_millis(t.duration_ms)),
+        })?,
+        None => media_controls.set_metadata(MediaMetadata::default())?,
+    };
+
+    Ok(())
+}
 
 pub fn update<T: AudioBackend>(
     model: &mut Model,
@@ -14,7 +35,15 @@ pub fn update<T: AudioBackend>(
     player: &mut T,
     yt_service: &YoutubeService,
     task: &Task<Message>,
-) -> Result<()> {
+    media_controls: &mut MediaControls,
+) -> Result<Message> {
+    // Logger
+
+    match msg {
+        Message::None | Message::Quit | Message::Tick => {}
+        _ => model.add_log(&format!("{msg:?}")),
+    }
+
     match msg {
         Message::Play => {
             if model.playback.status != PlaybackStatus::Playing
@@ -22,6 +51,7 @@ pub fn update<T: AudioBackend>(
             {
                 player.play()?;
                 model.playback.status = PlaybackStatus::Playing;
+                update_media_controls(model.current_track(), media_controls)?;
             }
         }
 
@@ -30,6 +60,15 @@ pub fn update<T: AudioBackend>(
                 player.pause();
                 model.playback.position_ms = player.get_position() - 100;
                 model.playback.status = PlaybackStatus::Paused;
+                update_media_controls(model.current_track(), media_controls)?;
+            }
+        }
+
+        Message::PlayPause => {
+            if player.is_playing() {
+                return Ok(Message::Pause);
+            } else {
+                return Ok(Message::Play);
             }
         }
 
@@ -38,8 +77,10 @@ pub fn update<T: AudioBackend>(
                 model
                     .playlist
                     .next_index(model.current_index, model.repeat.clone(), model.shuffle);
+
             if let Some(idx) = next_idx {
                 play_track(idx, model, player);
+                update_media_controls(model.current_track(), media_controls)?;
             }
         }
 
@@ -50,6 +91,7 @@ pub fn update<T: AudioBackend>(
 
             if let Some(idx) = prev_idx {
                 play_track(idx, model, player);
+                update_media_controls(model.current_track(), media_controls)?;
             }
         }
 
@@ -227,7 +269,7 @@ pub fn update<T: AudioBackend>(
                     ActivePanel::SearchInput => {}
                     ActivePanel::SearchResults => {
                         if model.ui.search_selected < model.search.results.len() {
-                            return Ok(());
+                            return Ok(Message::None);
                         }
                     }
                 }
@@ -314,7 +356,7 @@ pub fn update<T: AudioBackend>(
             if idx < model.search.results.len() {
                 if model.search.is_downloading {
                     model.add_log("Already downloading, please wait...");
-                    return Ok(());
+                    return Ok(Message::None);
                 }
 
                 model.search.is_downloading = true;
@@ -389,7 +431,7 @@ pub fn update<T: AudioBackend>(
             model.set_tracks(playlist);
         }
 
-        Message::Tick | Message::None => {
+        Message::Tick => {
             if model.playback.status == PlaybackStatus::Playing {
                 let pos = player.get_position();
                 model.playback.position_ms = pos;
@@ -420,9 +462,10 @@ pub fn update<T: AudioBackend>(
         }
 
         Message::Quit => {}
+        Message::None => {}
     }
 
-    Ok(())
+    Ok(Message::None)
 }
 
 fn play_track<T: AudioBackend>(idx: usize, model: &mut Model, player: &mut T) {
