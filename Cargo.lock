@@ -5202,7 +5202,7 @@ dependencies = [
 
 [[package]]
 name = "tusic"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-compat",
