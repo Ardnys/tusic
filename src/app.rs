@@ -1,5 +1,6 @@
 use crate::audio::AudioBackend;
-use crate::model::{ActivePanel, Model};
+use crate::config::Config;
+use crate::model::{ActivePanel, Model, SettingsField};
 use crate::msg::Message;
 use crate::ui::help::render_help;
 use crate::ui::layout::calculate_layout;
@@ -10,9 +11,10 @@ use crate::ui::playlist::render_playlist;
 use crate::ui::playlist::PlaylistState;
 use crate::ui::search::SearchResultsState;
 use crate::ui::search::{render_search_input, render_search_results};
+use crate::ui::settings::render_settings;
 use crate::update::{read_tracks, update};
-use crate::watcher;
-use crate::youtube::{get_scan_paths, YoutubeService};
+use crate::watcher::Watcher;
+use crate::youtube::YoutubeService;
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -20,7 +22,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     DefaultTerminal, Frame,
 };
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata};
@@ -33,20 +35,22 @@ pub struct App<T: AudioBackend> {
     player: T,
     yt_service: YoutubeService,
     running: bool,
+    config: Config,
     playlist_state: PlaylistState,
     search_results_state: SearchResultsState,
     logs_state: LogsState,
     task: Task<Message>,
     task_rx: Receiver<Message>,
     media_controls: Option<MediaControls>,
+    watcher: Watcher,
 }
 
 impl<T: AudioBackend> App<T> {
-    pub fn new(backend: T, yt_service: YoutubeService) -> Result<Self> {
+    pub fn new(backend: T, yt_service: YoutubeService, config: Config) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::channel::<Message>();
 
-        // File change watcher
-        watcher::watch(get_scan_paths(), task_tx.clone())?;
+        // File change watcher, pointed at the configured music directories.
+        let watcher = Watcher::new(config.resolved_dirs(), task_tx.clone())?;
 
         // Media controls are best-effort: on platforms without a session/D-Bus
         // they fail to initialize and we simply run without them.
@@ -57,12 +61,14 @@ impl<T: AudioBackend> App<T> {
             player: backend,
             yt_service,
             running: false,
+            config,
             playlist_state: PlaylistState::default(),
             search_results_state: SearchResultsState::default(),
             logs_state: LogsState::default(),
             task: Task::new(task_tx),
             task_rx,
             media_controls,
+            watcher,
         })
     }
 
@@ -82,6 +88,7 @@ impl<T: AudioBackend> App<T> {
                     MediaControlEvent::Previous => Message::Prev,
                     MediaControlEvent::Toggle => Message::PlayPause,
                     MediaControlEvent::Play => Message::Play,
+                    MediaControlEvent::Pause => Message::Pause,
                     MediaControlEvent::Stop => Message::Pause,
 
                     _ => Message::None,
@@ -99,9 +106,9 @@ impl<T: AudioBackend> App<T> {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.running = true;
 
-        let mut model = Model::default();
+        let mut model = Model::new(self.config.clone());
 
-        let playlist = read_tracks();
+        let playlist = read_tracks(&model.config);
         model.set_tracks(playlist);
 
         while self.running {
@@ -134,6 +141,7 @@ impl<T: AudioBackend> App<T> {
                 &self.yt_service,
                 &self.task,
                 &mut self.media_controls,
+                &mut self.watcher,
             )?;
 
             while !matches!(msg, Message::None | Message::Tick) {
@@ -145,6 +153,7 @@ impl<T: AudioBackend> App<T> {
                     &self.yt_service,
                     &self.task,
                     &mut self.media_controls,
+                    &mut self.watcher,
                 )?;
             }
 
@@ -161,6 +170,7 @@ impl<T: AudioBackend> App<T> {
                         &self.yt_service,
                         &self.task,
                         &mut self.media_controls,
+                        &mut self.watcher,
                     )?;
                 }
             }
@@ -196,6 +206,67 @@ impl<T: AudioBackend> App<T> {
         let active_search_input = matches!(active_panel, ActivePanel::SearchInput);
         let active_search_results = matches!(active_panel, ActivePanel::SearchResults);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // The delete-confirmation popup captures all input while open.
+        if model.ui.confirm_delete.is_some() {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    Message::ConfirmDeleteTrack
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    Message::CancelDeleteTrack
+                }
+                _ => Message::None,
+            };
+        }
+
+        // The Settings popup captures all input while open.
+        if model.ui.show_settings {
+            let field = model.ui.settings.field.clone();
+            return match field {
+                // Text input for adding a new directory. Arrows still navigate
+                // between settings; printable chars edit the input.
+                SettingsField::NewDir => match key.code {
+                    KeyCode::Esc => Message::ToggleSettings,
+                    KeyCode::Up => Message::SettingsNavUp,
+                    KeyCode::Down => Message::SettingsNavDown,
+                    // Enter adds the typed directory (or saves if the box is empty).
+                    KeyCode::Enter if model.ui.settings.new_dir.trim().is_empty() => {
+                        Message::SettingsSave
+                    }
+                    KeyCode::Enter => Message::SettingsAddDir,
+                    KeyCode::Backspace => Message::SettingsBackspace,
+                    KeyCode::Char(c) => Message::SettingsInput(c),
+                    _ => Message::None,
+                },
+                // Editing an existing entry in place captures all text input.
+                SettingsField::DirList if model.ui.settings.editing.is_some() => match key.code {
+                    KeyCode::Esc => Message::SettingsCancelEdit,
+                    KeyCode::Enter => Message::SettingsCommitEdit,
+                    KeyCode::Backspace => Message::SettingsEditBackspace,
+                    KeyCode::Char(c) => Message::SettingsEditInput(c),
+                    _ => Message::None,
+                },
+                SettingsField::DirList => match key.code {
+                    KeyCode::Esc => Message::ToggleSettings,
+                    KeyCode::Enter => Message::SettingsSave,
+                    KeyCode::Up => Message::SettingsNavUp,
+                    KeyCode::Down => Message::SettingsNavDown,
+                    KeyCode::Char('e') => Message::SettingsStartEdit,
+                    KeyCode::Char('d') | KeyCode::Delete => Message::SettingsRemoveDir,
+                    KeyCode::Char('p') => Message::SettingsMakePrimary,
+                    _ => Message::None,
+                },
+                SettingsField::UseCurrentDir => match key.code {
+                    KeyCode::Esc => Message::ToggleSettings,
+                    KeyCode::Enter => Message::SettingsSave,
+                    KeyCode::Char(' ') => Message::SettingsToggleCwd,
+                    KeyCode::Up => Message::SettingsNavUp,
+                    KeyCode::Down => Message::SettingsNavDown,
+                    _ => Message::None,
+                },
+            };
+        }
 
         if in_logs {
             return match key.code {
@@ -241,8 +312,11 @@ impl<T: AudioBackend> App<T> {
             (KeyCode::Char(' '), _) if active_playlist => Message::PlayPause,
 
             (KeyCode::Char('l'), _) => Message::ToggleLogs,
+            (KeyCode::Char('c'), _) => Message::ToggleSettings,
             (KeyCode::Char('r'), _) if active_playlist => Message::CycleRepeat,
             (KeyCode::Char('s'), _) if active_playlist => Message::ToggleShuffle,
+            (KeyCode::Char('d'), _) if active_playlist => Message::RequestDeleteTrack,
+            (KeyCode::Delete, _) if active_playlist => Message::RequestDeleteTrack,
             (KeyCode::Char('?'), _) if active_playlist => Message::ToggleHelp,
             (KeyCode::Char('y'), _) => Message::ToggleYoutube,
 
@@ -295,6 +369,62 @@ impl<T: AudioBackend> App<T> {
                 render_logs(f, logs_area, model, &mut self.logs_state);
             }
         }
+
+        if model.ui.show_settings {
+            render_settings(f, f.area(), model);
+        }
+
+        if model.ui.confirm_delete.is_some() {
+            self.render_delete_confirm(f, f.area(), model);
+        }
+    }
+
+    /// Centered "are you sure?" popup shown before a track is deleted from disk.
+    fn render_delete_confirm(&self, f: &mut Frame, area: Rect, model: &Model) {
+        let Some(idx) = model.ui.confirm_delete else {
+            return;
+        };
+        let name = model
+            .playlist
+            .tracks()
+            .get(idx)
+            .map(|t| t.display_name())
+            .unwrap_or_default();
+
+        // Centered popup, capped at 60 cols / 8 rows.
+        let w = area.width.clamp(20, 60);
+        let h = 8u16.min(area.height);
+        let x = area.x + area.width.saturating_sub(w) / 2;
+        let y = area.y + area.height.saturating_sub(h) / 2;
+        let popup = Rect::new(x, y, w, h);
+
+        f.render_widget(Clear, popup);
+
+        let block = Block::default()
+            .title(" Şarkıyı sil ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        let inner = block.inner(popup);
+        f.render_widget(block, popup);
+
+        let lines = vec![
+            Line::from(Span::raw(
+                "Bu şarkıyı diskten silmek istediğinize emin misiniz?",
+            )),
+            Line::from(Span::styled(
+                name,
+                Style::default().fg(Color::Yellow).bold(),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("[y] ", Style::default().fg(Color::Green).bold()),
+                Span::raw("Evet, sil   "),
+                Span::styled("[n/Esc] ", Style::default().fg(Color::Green).bold()),
+                Span::raw("İptal"),
+            ]),
+        ];
+        let p = Paragraph::new(lines).block(Block::default());
+        f.render_widget(p, inner);
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, model: &Model) {

@@ -2,26 +2,28 @@ use std::fs;
 use std::time::Duration;
 
 use crate::audio::AudioBackend;
-use crate::model::{ActivePanel, Model, PlaybackStatus};
+use crate::config::Config;
+use crate::model::{ActivePanel, Model, PlaybackStatus, SettingsField, SettingsState};
 use crate::msg::Message;
 use crate::playlist::{RepeatMode, Track};
 use crate::task::Task;
-use crate::youtube::{get_scan_paths, YoutubeService};
+use crate::watcher::Watcher;
+use crate::youtube::YoutubeService;
 use anyhow::Result;
-use souvlaki::{MediaControls, MediaMetadata};
+use souvlaki::{MediaControls, MediaMetadata, MediaPlayback, MediaPosition};
 
 pub fn update_media_controls(
-    track: Option<&Track>,
+    model: &Model,
     media_controls: &mut Option<MediaControls>,
 ) -> Result<()> {
     // Media controls are optional: if the platform/session didn't provide them
-    // we simply skip updating metadata.
+    // we simply skip updating.
     let Some(controls) = media_controls.as_mut() else {
         return Ok(());
     };
 
-    // Update current playing song:
-    match track {
+    // Update the currently playing song's metadata.
+    match model.current_track() {
         Some(t) => controls.set_metadata(MediaMetadata {
             title: Some(&t.title),
             album: Some(&t.album),
@@ -31,6 +33,19 @@ pub fn update_media_controls(
         })?,
         None => controls.set_metadata(MediaMetadata::default())?,
     };
+
+    // Report playback status. Without this the OS/MPRIS layer assumes the
+    // player is stopped and won't show the player or route media keys back to
+    // us — this is what makes the media keys actually work.
+    let progress = Some(MediaPosition(Duration::from_millis(
+        model.playback.position_ms,
+    )));
+    let playback = match model.playback.status {
+        PlaybackStatus::Playing => MediaPlayback::Playing { progress },
+        PlaybackStatus::Paused => MediaPlayback::Paused { progress },
+        PlaybackStatus::Stopped => MediaPlayback::Stopped,
+    };
+    controls.set_playback(playback)?;
 
     Ok(())
 }
@@ -42,6 +57,7 @@ pub fn update<T: AudioBackend>(
     yt_service: &YoutubeService,
     task: &Task<Message>,
     media_controls: &mut Option<MediaControls>,
+    watcher: &mut Watcher,
 ) -> Result<Message> {
     // Logger: skip high-frequency / no-op messages to keep the log useful.
     match msg {
@@ -57,7 +73,14 @@ pub fn update<T: AudioBackend>(
         | Message::LogScrollUp
         | Message::LogScrollDown
         | Message::LogScrollTop
-        | Message::LogScrollBottom => {}
+        | Message::LogScrollBottom
+        | Message::SettingsInput(_)
+        | Message::SettingsBackspace
+        | Message::SettingsToggleCwd
+        | Message::SettingsNavUp
+        | Message::SettingsNavDown
+        | Message::SettingsEditInput(_)
+        | Message::SettingsEditBackspace => {}
         _ => model.add_log(&format!("{msg:?}")),
     }
 
@@ -70,7 +93,7 @@ pub fn update<T: AudioBackend>(
             {
                 player.play()?;
                 model.playback.status = PlaybackStatus::Playing;
-                update_media_controls(model.current_track(), media_controls)?;
+                update_media_controls(model, media_controls)?;
             }
         }
 
@@ -79,7 +102,7 @@ pub fn update<T: AudioBackend>(
                 player.pause();
                 model.playback.position_ms = player.get_position().saturating_sub(100);
                 model.playback.status = PlaybackStatus::Paused;
-                update_media_controls(model.current_track(), media_controls)?;
+                update_media_controls(model, media_controls)?;
             }
         }
 
@@ -98,8 +121,8 @@ pub fn update<T: AudioBackend>(
                     .next_index(model.current_index, model.repeat.clone(), model.shuffle);
 
             if let Some(idx) = next_idx {
-                play_track(idx, model, player);
-                update_media_controls(model.current_track(), media_controls)?;
+                play_track(idx, model, player, media_controls);
+                update_media_controls(model, media_controls)?;
             }
         }
 
@@ -109,8 +132,8 @@ pub fn update<T: AudioBackend>(
                 .prev_index(model.current_index, model.repeat.clone());
 
             if let Some(idx) = prev_idx {
-                play_track(idx, model, player);
-                update_media_controls(model.current_track(), media_controls)?;
+                play_track(idx, model, player, media_controls);
+                update_media_controls(model, media_controls)?;
             }
         }
 
@@ -287,7 +310,7 @@ pub fn update<T: AudioBackend>(
                     model.search.is_loading = true;
                 }
             } else if matches!(model.ui.active_panel, ActivePanel::Playlist) {
-                play_track(model.ui.selected, model, player);
+                play_track(model.ui.selected, model, player, media_controls);
             }
         }
 
@@ -299,6 +322,48 @@ pub fn update<T: AudioBackend>(
                 model.ui.active_panel = ActivePanel::Playlist;
             } else {
                 model.ui.selected = model.current_index.unwrap_or(0);
+            }
+        }
+
+        Message::RequestDeleteTrack => {
+            // Only the playlist supports deletion, and only when it has a valid
+            // selection. Opens the confirmation popup; nothing is deleted yet.
+            if matches!(model.ui.active_panel, ActivePanel::Playlist)
+                && model.ui.selected < model.playlist.len()
+            {
+                model.ui.confirm_delete = Some(model.ui.selected);
+            }
+        }
+
+        Message::CancelDeleteTrack => {
+            model.ui.confirm_delete = None;
+        }
+
+        Message::ConfirmDeleteTrack => {
+            if let Some(idx) = model.ui.confirm_delete.take() {
+                if let Some(track) = model.playlist.get(idx) {
+                    let path = track.path.clone();
+                    let was_current = model.current_index == Some(idx);
+                    match std::fs::remove_file(&path) {
+                        Ok(_) => {
+                            model.add_log(&format!("Deleted: {}", path.display()));
+                            // If the deleted track was playing, stop playback.
+                            if was_current {
+                                player.stop();
+                                model.playback.status = PlaybackStatus::Stopped;
+                                model.current_index = None;
+                            }
+                            // Reload the library from disk so indices stay valid.
+                            let playlist = read_tracks(&model.config);
+                            model.set_tracks(playlist);
+                            model.ui.selected = model
+                                .ui
+                                .selected
+                                .min(model.playlist.len().saturating_sub(1));
+                        }
+                        Err(e) => model.add_log(&format!("Delete failed: {e}")),
+                    }
+                }
             }
         }
 
@@ -340,8 +405,11 @@ pub fn update<T: AudioBackend>(
         Message::DoYoutubeSearch(query) => {
             if !query.is_empty() {
                 model.search.is_loading = true;
+                model.search.error = None;
                 model.add_log(&format!("Searching YouTube: {}", &query));
                 model.ui.active_panel = ActivePanel::SearchInput;
+                // Restart the loading animation from its first frame.
+                model.ui.anim_tick = 0;
 
                 let service = yt_service.clone();
 
@@ -357,12 +425,21 @@ pub fn update<T: AudioBackend>(
 
             match result {
                 Ok(tracks) => {
+                    model.search.error = None;
                     model.search.results = tracks;
                     model.ui.active_panel = ActivePanel::SearchResults;
 
                     model.add_log(&format!("Found {} tracks", model.search.results.len()));
                 }
-                Err(e) => model.add_log(&format!("Search error: {e:?}")),
+                Err(e) => {
+                    model.add_log(&format!("Search error: {e:?}"));
+                    model.search.results.clear();
+                    model.search.error = Some(
+                        "YouTube araması yapılamadı. İnternet bağlantınızı kontrol edin."
+                            .to_string(),
+                    );
+                    model.ui.active_panel = ActivePanel::SearchResults;
+                }
             }
         }
 
@@ -374,14 +451,17 @@ pub fn update<T: AudioBackend>(
                 }
 
                 model.search.is_downloading = true;
+                // Restart the loading animation from its first frame.
+                model.ui.anim_tick = 0;
 
                 let track = model.search.results[idx].clone();
                 let track_title = track.title.clone();
 
                 let service = yt_service.clone();
+                let dir = model.config.download_dir();
 
                 task.spawn(async move {
-                    let result = service.download_track(&track).await;
+                    let result = service.download_track(&track, &dir).await;
 
                     Message::YoutubeDownloadResult(result)
                 });
@@ -399,7 +479,7 @@ pub fn update<T: AudioBackend>(
 
                     model.current_index = Some(idx);
                     model.ui.active_panel = ActivePanel::Playlist;
-                    play_track(idx, model, player);
+                    play_track(idx, model, player, media_controls);
 
                     model.add_log(&format!("Downloaded: {}", track.display_name()));
                 }
@@ -439,13 +519,189 @@ pub fn update<T: AudioBackend>(
         }
 
         Message::FileChanged(e) => {
-            model.add_log(&format!("{e:?}"));
+            model.add_log(&e);
 
-            let playlist = read_tracks();
+            let playlist = read_tracks(&model.config);
             model.set_tracks(playlist);
         }
 
+        Message::ToggleSettings => {
+            model.ui.show_settings = !model.ui.show_settings;
+            if model.ui.show_settings {
+                // Load current config into the editable popup state.
+                model.ui.settings = SettingsState::from_config(&model.config);
+            } else {
+                model.ui.active_panel = ActivePanel::Playlist;
+            }
+        }
+
+        Message::SettingsInput(c) => {
+            if model.ui.settings.field == SettingsField::NewDir {
+                model.ui.settings.new_dir.push(c);
+            }
+        }
+
+        Message::SettingsBackspace => {
+            if model.ui.settings.field == SettingsField::NewDir {
+                model.ui.settings.new_dir.pop();
+            }
+        }
+
+        Message::SettingsToggleCwd => {
+            model.ui.settings.use_current_dir = !model.ui.settings.use_current_dir;
+        }
+
+        // Arrow navigation flows across the whole popup in the same order the
+        // fields are rendered: the "add" input (top), then the directory list,
+        // then the checkbox (and back up).
+        Message::SettingsNavDown => {
+            let s = &mut model.ui.settings;
+            match s.field {
+                SettingsField::NewDir => {
+                    if s.dirs.is_empty() {
+                        s.field = SettingsField::UseCurrentDir;
+                    } else {
+                        s.field = SettingsField::DirList;
+                        s.selected = 0;
+                    }
+                }
+                SettingsField::DirList => {
+                    if s.selected + 1 < s.dirs.len() {
+                        s.selected += 1;
+                    } else {
+                        s.field = SettingsField::UseCurrentDir;
+                    }
+                }
+                SettingsField::UseCurrentDir => {}
+            }
+        }
+
+        Message::SettingsNavUp => {
+            let s = &mut model.ui.settings;
+            match s.field {
+                // The "add" input is the first field; nothing above it.
+                SettingsField::NewDir => {}
+                SettingsField::DirList => {
+                    if s.selected > 0 {
+                        s.selected -= 1;
+                    } else {
+                        s.field = SettingsField::NewDir;
+                    }
+                }
+                SettingsField::UseCurrentDir => {
+                    if s.dirs.is_empty() {
+                        s.field = SettingsField::NewDir;
+                    } else {
+                        s.field = SettingsField::DirList;
+                        s.selected = s.dirs.len().saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        Message::SettingsAddDir => {
+            let s = &mut model.ui.settings;
+            let new = s.new_dir.trim().to_string();
+            if !new.is_empty() && !s.dirs.contains(&new) {
+                s.dirs.push(new);
+                s.selected = s.dirs.len() - 1;
+            }
+            s.new_dir.clear();
+        }
+
+        Message::SettingsRemoveDir => {
+            let s = &mut model.ui.settings;
+            if s.selected < s.dirs.len() {
+                s.dirs.remove(s.selected);
+                s.selected = s.selected.min(s.dirs.len().saturating_sub(1));
+            }
+        }
+
+        Message::SettingsMakePrimary => {
+            let s = &mut model.ui.settings;
+            if s.selected < s.dirs.len() && s.selected > 0 {
+                let dir = s.dirs.remove(s.selected);
+                s.dirs.insert(0, dir);
+                s.selected = 0;
+            }
+        }
+
+        Message::SettingsStartEdit => {
+            let s = &mut model.ui.settings;
+            if s.selected < s.dirs.len() {
+                s.editing = Some(s.selected);
+                s.edit_buf = s.dirs[s.selected].clone();
+            }
+        }
+
+        Message::SettingsEditInput(c) => {
+            if model.ui.settings.editing.is_some() {
+                model.ui.settings.edit_buf.push(c);
+            }
+        }
+
+        Message::SettingsEditBackspace => {
+            if model.ui.settings.editing.is_some() {
+                model.ui.settings.edit_buf.pop();
+            }
+        }
+
+        Message::SettingsCommitEdit => {
+            let s = &mut model.ui.settings;
+            if let Some(i) = s.editing.take() {
+                let value = s.edit_buf.trim().to_string();
+                if value.is_empty() {
+                    // Empty value removes the entry.
+                    if i < s.dirs.len() {
+                        s.dirs.remove(i);
+                        s.selected = s.selected.min(s.dirs.len().saturating_sub(1));
+                    }
+                } else if i < s.dirs.len() {
+                    s.dirs[i] = value;
+                }
+                s.edit_buf.clear();
+            }
+        }
+
+        Message::SettingsCancelEdit => {
+            let s = &mut model.ui.settings;
+            s.editing = None;
+            s.edit_buf.clear();
+        }
+
+        Message::SettingsSave => {
+            model.config.scan_dirs = model.ui.settings.dirs.clone();
+            model.config.use_current_dir = model.ui.settings.use_current_dir;
+
+            if let Err(e) = model.config.save() {
+                model.add_log(&format!("Failed to save config: {e}"));
+            }
+
+            let dirs = model.config.resolved_dirs();
+            model.add_log(&format!("Scan directories: {dirs:?}"));
+
+            // Re-point the file watcher and reload the library immediately.
+            if let Err(e) = watcher.set_paths(dirs) {
+                model.add_log(&format!("Failed to update watcher: {e}"));
+            }
+            let playlist = read_tracks(&model.config);
+            model.set_tracks(playlist);
+
+            // Selection may now be out of range; clamp it.
+            model.ui.selected = model
+                .ui
+                .selected
+                .min(model.playlist.len().saturating_sub(1));
+
+            model.ui.show_settings = false;
+            model.ui.active_panel = ActivePanel::Playlist;
+        }
+
         Message::Tick => {
+            // Advance the UI animation clock (~25 fps given the 40ms poll). This
+            // is what makes the download skeleton shimmer move.
+            model.ui.anim_tick = model.ui.anim_tick.wrapping_add(1);
+
             if model.playback.status == PlaybackStatus::Playing {
                 let pos = player.get_position();
                 model.playback.position_ms = pos;
@@ -456,7 +712,12 @@ pub fn update<T: AudioBackend>(
                 if model.playback.position_ms >= model.playback.duration_ms.saturating_sub(100) {
                     if model.repeat == RepeatMode::One {
                         model.add_log("Loop mode: restarting same track");
-                        play_track(model.current_index.unwrap_or(0), model, player);
+                        play_track(
+                            model.current_index.unwrap_or(0),
+                            model,
+                            player,
+                            media_controls,
+                        );
                     } else {
                         model.add_log("Song ended, playing next track");
                         let next_idx = model.playlist.next_index(
@@ -465,7 +726,7 @@ pub fn update<T: AudioBackend>(
                             model.shuffle,
                         );
                         if let Some(idx) = next_idx {
-                            play_track(idx, model, player);
+                            play_track(idx, model, player, media_controls);
                         } else {
                             model.playback.status = PlaybackStatus::Paused;
                             player.pause();
@@ -482,7 +743,12 @@ pub fn update<T: AudioBackend>(
     Ok(Message::None)
 }
 
-fn play_track<T: AudioBackend>(idx: usize, model: &mut Model, player: &mut T) {
+fn play_track<T: AudioBackend>(
+    idx: usize,
+    model: &mut Model,
+    player: &mut T,
+    media_controls: &mut Option<MediaControls>,
+) {
     let track = match model.playlist.get(idx) {
         Some(t) => t.clone(),
         None => return,
@@ -501,6 +767,7 @@ fn play_track<T: AudioBackend>(idx: usize, model: &mut Model, player: &mut T) {
 
             player.stop();
             model.playback.status = PlaybackStatus::Stopped;
+            let _ = update_media_controls(model, media_controls);
 
             return;
         }
@@ -522,6 +789,10 @@ fn play_track<T: AudioBackend>(idx: usize, model: &mut Model, player: &mut T) {
             model.playback.status = PlaybackStatus::Stopped;
         }
     }
+
+    // Push the new track + status to the OS media controls (lock screen,
+    // media keys). Best-effort: ignore failures so playback isn't affected.
+    let _ = update_media_controls(model, media_controls);
 }
 
 /// Keep `scroll` such that `selected` stays within a window of `viewport` rows.
@@ -549,15 +820,14 @@ fn adjust_log_scroll(model: &mut Model) {
     keep_in_view(model.ui.log_selected, &mut model.ui.log_scroll, v);
 }
 
-pub fn read_tracks() -> Vec<Track> {
+pub fn read_tracks(config: &Config) -> Vec<Track> {
     use crate::playlist::is_audio_file;
 
     let mut tracks = Vec::new();
 
-    let paths = get_scan_paths();
-
-    for p in paths {
-        let Ok(read_dir) = fs::read_dir(&p) else {
+    // Scan every configured directory; skip ones that can't be read.
+    for dir in config.resolved_dirs() {
+        let Ok(read_dir) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in read_dir.filter_map(|e| e.ok()) {

@@ -1,7 +1,3 @@
-use std::ffi::OsString;
-
-use inotify::Event;
-
 use crate::{playlist::Track, youtube::YoutubeTrack};
 
 #[derive(Debug)]
@@ -21,6 +17,9 @@ pub enum Message {
     CycleRepeat,
 
     // Playlist Controls
+    RequestDeleteTrack,
+    ConfirmDeleteTrack,
+    CancelDeleteTrack,
     ScrollUp,
     ScrollDown,
     ScrollUpHalf,
@@ -37,6 +36,23 @@ pub enum Message {
     ToggleActivePanel,
     ToggleYoutube,
 
+    // Settings popup
+    ToggleSettings,
+    SettingsInput(char),
+    SettingsBackspace,
+    SettingsToggleCwd,
+    SettingsNavUp,
+    SettingsNavDown,
+    SettingsAddDir,
+    SettingsRemoveDir,
+    SettingsMakePrimary,
+    SettingsStartEdit,
+    SettingsEditInput(char),
+    SettingsEditBackspace,
+    SettingsCommitEdit,
+    SettingsCancelEdit,
+    SettingsSave,
+
     // Youtube Search
     SearchInput(char),
     SearchBackspace,
@@ -50,8 +66,8 @@ pub enum Message {
     LogScrollTop,
     LogScrollBottom,
 
-    // Watch file changes:
-    FileChanged(Event<OsString>),
+    // Watch file changes (carries a human-readable description of the event):
+    FileChanged(String),
 
     Tick,
     None,

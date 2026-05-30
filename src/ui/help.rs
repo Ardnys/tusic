@@ -31,8 +31,12 @@ pub fn render_help(f: &mut Frame, area: Rect) {
         Span::raw("Select & Play  "),
         Span::styled("[tab] ", Style::default().fg(Color::Yellow).bold()),
         Span::raw("Switch panel  "),
+        Span::styled("[d] ", Style::default().fg(Color::Yellow).bold()),
+        Span::raw("Delete  "),
         Span::styled("[y] ", Style::default().fg(Color::Yellow).bold()),
         Span::raw("Toggle YouTube Panel  "),
+        Span::styled("[c] ", Style::default().fg(Color::Yellow).bold()),
+        Span::raw("Settings  "),
         Span::styled("[q] ", Style::default().fg(Color::Yellow).bold()),
         Span::raw("Quit"),
     ]);
