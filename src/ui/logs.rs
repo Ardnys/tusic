@@ -1,7 +1,7 @@
 use crate::model::Model;
 use ratatui::{
     layout::Rect,
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Clear, Scrollbar, ScrollbarOrientation},
     Frame,
@@ -23,8 +23,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, model: &Model, state: &mut LogsSta
     let block = Block::default()
         .title(" Logs (press L to close) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .on_black();
+        .border_style(Style::default().fg(Color::Yellow));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -36,9 +35,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, model: &Model, state: &mut LogsSta
     let messages = &model.ui.log_messages;
 
     if messages.is_empty() {
-        let empty = ratatui::widgets::Paragraph::new("No logs")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default());
+        let empty = ratatui::widgets::Paragraph::new("No logs").block(Block::default());
         f.render_widget(empty, inner);
         return;
     }

@@ -1,45 +1,11 @@
 use crate::playlist::Track;
 use anyhow::Error;
 use rusty_ytdl::search::{SearchOptions, SearchResult};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use yt_dlp::{
     client::{Libraries, LibraryInstaller},
     Downloader, VideoSelection,
 };
-
-pub fn get_download_dir() -> PathBuf {
-    if let Some(mut dir) = dirs::audio_dir() {
-        dir.push("tusic");
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir).ok();
-        }
-        dir
-    } else if let Ok(cwd) = std::env::current_dir() {
-        let dir = cwd.join("downloads");
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir).ok();
-        }
-        dir
-    } else {
-        PathBuf::from(".")
-    }
-}
-
-pub fn get_scan_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    // Default music dir
-    if let Some(music_dir) = dirs::audio_dir() {
-        if music_dir.exists() {
-            paths.push(music_dir);
-        }
-    }
-
-    // Downloaded songs dir
-    paths.push(get_download_dir());
-
-    paths
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct YoutubeTrack {
@@ -55,6 +21,9 @@ pub struct SearchState {
     pub results: Vec<YoutubeTrack>,
     pub is_loading: bool,
     pub is_downloading: bool,
+    /// Set when the last search failed (e.g. no network). Shown in the results
+    /// panel and cleared when a new search starts or succeeds.
+    pub error: Option<String>,
 }
 
 impl YoutubeTrack {
@@ -97,6 +66,9 @@ impl YoutubeService {
 
         let libraries = Libraries::new(ytdlp_path, PathBuf::from("ffmpeg"));
 
+        // The builder's output_dir is just an initial default; each download
+        // targets an explicit absolute path (see `download_track`), so the
+        // directory can change at runtime without rebuilding the downloader.
         let downloader = Downloader::builder(libraries, download_dir).build().await?;
 
         Ok(Self { downloader })
@@ -133,11 +105,11 @@ impl YoutubeService {
         Ok(tracks)
     }
 
-    pub async fn download_track(&self, track: &YoutubeTrack) -> anyhow::Result<Track> {
+    pub async fn download_track(&self, track: &YoutubeTrack, dir: &Path) -> anyhow::Result<Track> {
         let safe_title = sanitize_filename(&track.title);
-        // Append the video id so two videos with the same title don't overwrite
-        // each other's file.
-        let mut filename = format!("{}-{}.m4a", safe_title, track.video_id);
+        let safe_channel = sanitize_filename(&track.channel);
+        // Name the file "Title - Channel" so it reads nicely in the library.
+        let mut filename = format!("{} - {}.m4a", safe_title, safe_channel);
 
         let video = self
             .downloader
@@ -157,16 +129,14 @@ impl YoutubeService {
                 yt_dlp::model::AudioQuality::High,
                 yt_dlp::model::AudioCodecPreference::MP3,
             );
-            filename = format!("{}-{}.mp3", safe_title, track.video_id);
+            filename = format!("{} - {}.mp3", safe_title, safe_channel);
         }
 
         match format {
             Some(f) => {
-                let video_path = self
-                    .downloader
-                    .download_format(f, filename)
-                    //.download_audio_stream(&video, &filename)
-                    .await?;
+                // Download straight into the configured directory.
+                let target = dir.join(filename);
+                let video_path = self.downloader.download_format_to_path(f, &target).await?;
 
                 Ok(track.to_track(video_path))
             }
