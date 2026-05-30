@@ -161,7 +161,11 @@ mod tests {
     use super::*;
 
     fn playlist_of(n: usize) -> Playlist {
-        Playlist::from_tracks((0..n).map(|i| Track::new(format!("/tmp/{i}.mp3").into())).collect())
+        Playlist::from_tracks(
+            (0..n)
+                .map(|i| Track::new(format!("/tmp/{i}.mp3").into()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -210,7 +214,10 @@ mod tests {
             assert!(n < 5 && n != 2, "shuffle returned {n}");
         }
         // Single-track playlist must still yield the only index.
-        assert_eq!(playlist_of(1).next_index(Some(0), RepeatMode::None, true), Some(0));
+        assert_eq!(
+            playlist_of(1).next_index(Some(0), RepeatMode::None, true),
+            Some(0)
+        );
     }
 
     #[test]
