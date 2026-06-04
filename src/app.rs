@@ -2,16 +2,12 @@ use crate::audio::AudioBackend;
 use crate::config::Config;
 use crate::model::{ActivePanel, Model, SettingsField};
 use crate::msg::Message;
-use crate::ui::help::render_help;
 use crate::ui::layout::calculate_layout;
-use crate::ui::logs::render_logs;
-use crate::ui::logs::LogsState;
-use crate::ui::player::render_player;
-use crate::ui::playlist::render_playlist;
-use crate::ui::playlist::PlaylistState;
+use crate::ui::logs::{self, LogsState};
+use crate::ui::playlist::{self, PlaylistState};
 use crate::ui::search::SearchResultsState;
-use crate::ui::search::{render_search_input, render_search_results};
-use crate::ui::settings::render_settings;
+use crate::ui::{help, popup, settings};
+use crate::ui::{player, search};
 use crate::update::{read_tracks, update};
 use crate::watcher::Watcher;
 use crate::youtube::YoutubeService;
@@ -22,7 +18,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     DefaultTerminal, Frame,
 };
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata};
@@ -347,12 +343,12 @@ impl<T: AudioBackend> App<T> {
 
         self.render_header(f, areas.header, model);
 
-        render_player(f, areas.now_playing, model);
-        render_playlist(f, areas.playlist, model, &mut self.playlist_state);
+        player::render_player(f, areas.now_playing, model);
+        playlist::render_playlist(f, areas.playlist, model, &mut self.playlist_state);
 
         if model.ui.show_youtube {
-            render_search_input(f, areas.search_input, model);
-            render_search_results(
+            search::render_search_input(f, areas.search_input, model);
+            search::render_search_results(
                 f,
                 areas.search_results,
                 model,
@@ -361,74 +357,26 @@ impl<T: AudioBackend> App<T> {
         }
 
         if model.ui.show_help {
-            render_help(f, areas.help);
+            help::render_help(f, areas.help);
         }
 
         if model.ui.show_logs {
             if let Some(logs_area) = areas.logs {
-                render_logs(f, logs_area, model, &mut self.logs_state);
+                logs::render_logs(f, logs_area, model, &mut self.logs_state);
             }
         }
 
         if model.ui.show_settings {
-            render_settings(f, f.area(), model);
+            settings::render_settings(f, f.area(), model);
         }
 
         if model.ui.confirm_delete.is_some() {
-            self.render_delete_confirm(f, f.area(), model);
+            popup::render_delete_confirm(f, f.area(), model);
         }
     }
 
-    /// Centered "are you sure?" popup shown before a track is deleted from disk.
-    fn render_delete_confirm(&self, f: &mut Frame, area: Rect, model: &Model) {
-        let Some(idx) = model.ui.confirm_delete else {
-            return;
-        };
-        let name = model
-            .playlist
-            .tracks()
-            .get(idx)
-            .map(|t| t.display_name())
-            .unwrap_or_default();
-
-        // Centered popup, capped at 60 cols / 8 rows.
-        let w = area.width.clamp(20, 60);
-        let h = 8u16.min(area.height);
-        let x = area.x + area.width.saturating_sub(w) / 2;
-        let y = area.y + area.height.saturating_sub(h) / 2;
-        let popup = Rect::new(x, y, w, h);
-
-        f.render_widget(Clear, popup);
-
-        let block = Block::default()
-            .title(" Şarkıyı sil ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red));
-        let inner = block.inner(popup);
-        f.render_widget(block, popup);
-
-        let lines = vec![
-            Line::from(Span::raw(
-                "Bu şarkıyı diskten silmek istediğinize emin misiniz?",
-            )),
-            Line::from(Span::styled(
-                name,
-                Style::default().fg(Color::Yellow).bold(),
-            )),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("[y] ", Style::default().fg(Color::Green).bold()),
-                Span::raw("Evet, sil   "),
-                Span::styled("[n/Esc] ", Style::default().fg(Color::Green).bold()),
-                Span::raw("İptal"),
-            ]),
-        ];
-        let p = Paragraph::new(lines).block(Block::default());
-        f.render_widget(p, inner);
-    }
-
     fn render_header(&self, f: &mut Frame, area: Rect, model: &Model) {
-        let title = " TUSIC ";
+        let title = format!("[ TUSIC v{} ] ", env!("CARGO_PKG_VERSION"));
 
         let track_info = if let Some(idx) = model.current_index {
             let total = model.playlist.len();
@@ -446,9 +394,9 @@ impl<T: AudioBackend> App<T> {
         };
 
         let active_panel_text = match model.ui.active_panel {
-            ActivePanel::Playlist => " [Playlist]",
-            ActivePanel::SearchInput => " [Search Input]",
-            ActivePanel::SearchResults => " [Search Results]",
+            ActivePanel::Playlist => "[Playlist]",
+            ActivePanel::SearchInput => "[Search Input]",
+            ActivePanel::SearchResults => "[Search Results]",
         };
 
         let header_text = Line::from(vec![

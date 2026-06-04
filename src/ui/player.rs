@@ -36,6 +36,8 @@ pub fn render_player(f: &mut Frame, area: Rect, model: &Model) {
         RepeatMode::None => "Loop:Off",
     };
 
+    let volume_text = format!("Vol:%{}", model.volume);
+
     // Title
     let track = model.current_track();
     let title = if let Some(track) = track {
@@ -49,7 +51,7 @@ pub fn render_player(f: &mut Frame, area: Rect, model: &Model) {
 
     let block = Block::default()
         .title(title)
-        .title_bottom(format!(" {shuffle_text} - {loop_text} "))
+        .title_bottom(format!(" {shuffle_text} - {loop_text} - {volume_text} "))
         .borders(Borders::ALL)
         .border_style(border_style);
 
