@@ -25,16 +25,14 @@ pub fn render_delete_confirm(f: &mut Frame, area: Rect, model: &Model) {
     f.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Şarkıyı sil ")
+        .title(" Delete song file ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
     let lines = vec![
-        Line::from(Span::raw(
-            "Bu şarkıyı diskten silmek istediğinize emin misiniz?",
-        )),
+        Line::from(Span::raw("Delete this file from the disk. Are you sure?")),
         Line::from(Span::styled(
             name,
             Style::default().fg(Color::Yellow).bold(),
@@ -42,9 +40,9 @@ pub fn render_delete_confirm(f: &mut Frame, area: Rect, model: &Model) {
         Line::from(""),
         Line::from(vec![
             Span::styled("[y] ", Style::default().fg(Color::Green).bold()),
-            Span::raw("Evet, sil   "),
+            Span::raw("Yes, delete   "),
             Span::styled("[n/Esc] ", Style::default().fg(Color::Green).bold()),
-            Span::raw("İptal"),
+            Span::raw("Cancel"),
         ]),
     ];
     let p = Paragraph::new(lines).block(Block::default());
