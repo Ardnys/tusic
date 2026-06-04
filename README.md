@@ -4,7 +4,7 @@ Lightweight TUI Music Player written in Rust + [ratatui](https://ratatui.rs/).
 
 Download & Play songs from YouTube or ~/Music folder with one key press.
 
-![Preview](export/preview.gif)
+![Preview](export/tusic.gif)
 
 Uses [yt-dlp](https://docs.rs/yt-dlp/latest/yt_dlp/) to download audio from YouTube.
 
