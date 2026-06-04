@@ -57,10 +57,16 @@ pub fn download_ytdlp(config_dir: &Path) -> anyhow::Result<()> {
         .parallel_requests(8)
         .build()?;
 
-    let dl =
-        Download::new("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux")
-            .file_name(&ytdlp_path)
-            .progress(Arc::new(DownloadProgress::new(0)));
+    #[cfg(target_os = "linux")]
+    let yt_dlp_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+    #[cfg(target_os = "macos")]
+    let yt_dlp_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+    #[cfg(target_os = "windows")]
+    let yt_dlp_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+
+    let dl = Download::new(yt_dlp_url)
+        .file_name(&ytdlp_path)
+        .progress(Arc::new(DownloadProgress::new(0)));
 
     let result = downloader.download(&[dl])?;
 
